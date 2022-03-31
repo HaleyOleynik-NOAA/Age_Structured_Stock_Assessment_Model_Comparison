@@ -1,3 +1,8 @@
+# Load the R MPI package if it is not already loaded.
+if (!is.loaded("mpi_initialize")) {
+  library("Rmpi")
+}
+
 #' Function to run Metapopulation Assessment System (https://github.com/nmfs-fish-tools/r4MAS)
 #' @name run_mas
 #' @description Function to read simulated true values from the operating model and to run MAS
@@ -19,13 +24,14 @@
   }
 }
 
-run_mas <- function(
+run_mas_segment <- function(
   maindir = maindir, 
   subdir = "MAS", 
   om_sim_num = NULL, 
   casedir = casedir, 
   em_bias_cor = em_bias_cor, 
-  input_filename = NULL) {
+  input_filename = NULL,
+  begin, end) {
   
   if (!("r4MAS" %in% installed.packages()[, "Package"])) stop("Please install r4MAS!")
   
@@ -41,7 +47,7 @@ end = 0
 mpi.irecv(begin, tag = mpi.any.tag, source = 0)
 mpi.irecv(end, tag = mpi.any.tag, source = 0)
 
-  for (om_sim in begin:end) {
+  for (om_sim in begin[mpi.comm.rank()]:end[mpi.comm.rank()]) {
     load(file=file.path(casedir, "output", "OM", paste("OM", om_sim, ".RData", sep="")))
     
     library(r4MAS)
@@ -313,4 +319,56 @@ mpi.irecv(end, tag = mpi.any.tag, source = 0)
     write(mas_model$GetOutput(), file = toString(output_file))
     mas_model$Reset()
   }
+}
+
+
+
+run_mas_segment <- function(
+  maindir = maindir,
+  subdir = "MAS",
+  om_sim_num = NULL,
+  casedir = casedir,
+  em_bias_cor = em_bias_cor,
+  input_filename = NULL){
+id <- mpi.comm.rank(comm = 0)
+ns <- 5# mpi.universe.size() - 1
+mpi.spawn.Rslaves(nslaves = ns)
+nsims <- 120
+
+begin <- rep(0, ns)
+end <- rep(0, ns)
+#create scenario segments
+if (id == 0) {
+  segments <- nsims / ns
+
+  for (i in 1:ns) {
+    if (i < ns) {
+      begin[i] <- (i - 1) * segments
+      end[i] <- i * segments
+    } else{
+      begin[i] <- (i - 1) * segments
+      end[i] <- nsims
+    }
+  }
+}
+
+
+
+#pass the function to all slaves
+mpi.bcast.Robj2slave(obj = run_mas_segment)
+
+#execute all slaves
+x <- mpi.remote.exec(run_mas_segment,  maindir,
+subdir = "MAS",
+om_sim_num,
+casedir,
+em_bias_cor,
+input_filename,
+begin, end)
+
+
+
+# Tell all slaves to close down, and exit the program
+mpi.close.Rslaves(dellog = FALSE)
+mpi.quit()
 }
